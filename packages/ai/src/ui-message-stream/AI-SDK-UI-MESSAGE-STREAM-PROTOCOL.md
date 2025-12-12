@@ -68,7 +68,7 @@ UIMessageChunk Objects
 
 ## Message Chunk Types
 
-All chunks have a `type` field that determines their structure. The protocol defines 24 chunk types organized into categories.
+All chunks have a `type` field that determines their structure. The protocol defines 25 chunk types organized into categories.
 
 ### Flow Control Chunks
 
@@ -463,150 +463,24 @@ Error notification.
 
 ## UI Message Structure
 
-Chunks are processed into `UIMessage` objects for rendering:
+Chunks are processed into `UIMessage` objects for rendering. A `UIMessage` contains an `id`, `role`, optional `metadata`, and a
+list of parts. Parts aggregate related chunk types:
 
-```typescript
-interface UIMessage {
-  id: string;
-  role: "system" | "user" | "assistant";
-  metadata?: unknown;
-  parts: UIMessagePart[];
-}
+- **Text part (`type: "text"`)** – Consolidates the `text-*` chunks into a single string with `state: "streaming" | "done"`
+  and any `providerMetadata`.
+- **Reasoning part (`type: "reasoning"`)** – Mirrors text parts but for `reasoning-*` chunks.
+- **Source parts** – `source-url` and `source-document` parts expose `sourceId`, links, titles, and optional provider metadata.
+- **File part (`type: "file"`)** – Captures streamed file references with `url`, `mediaType`, and optional `filename`/`providerMetadata`.
+- **Data part (`type: data-*`)** – Stores custom payloads, optionally keyed by `id` for updates and supporting transient data.
+- **Step boundary part (`type: "step-start"`)** – Inserted when a `start-step` chunk is received to delineate stitched backend
+  steps.
+- **Tool parts** – Represent tool invocations:
+  - *Static tools* (`type: tool-${toolName}`) carry the tool name from the registered toolset.
+  - *Dynamic tools* (`type: "dynamic-tool"`) carry a runtime `toolName`.
 
-type UIMessagePart =
-  | TextUIPart
-  | ReasoningUIPart
-  | ToolUIPart
-  | DynamicToolUIPart
-  | SourceUrlUIPart
-  | SourceDocumentUIPart
-  | FileUIPart
-  | DataUIPart
-  | StepStartUIPart;
-```
-
-### Text UI Part
-
-```typescript
-interface TextUIPart {
-  type: "text";
-  text: string;
-  state?: "streaming" | "done";
-  providerMetadata?: ProviderMetadata;
-}
-```
-
-### Reasoning UI Part
-
-```typescript
-interface ReasoningUIPart {
-  type: "reasoning";
-  text: string;
-  state?: "streaming" | "done";
-  providerMetadata?: ProviderMetadata;
-}
-```
-
-### Tool UI Part
-
-Static tools (registered at compile time):
-
-```typescript
-interface ToolUIPart {
-  type: `tool-${toolName}`;
-  toolCallId: string;
-  title?: string;
-  providerExecuted?: boolean;
-  state: "input-streaming" | "input-available" | "approval-requested" |
-         "approval-responded" | "output-available" | "output-error" | "output-denied";
-  input?: unknown;
-  output?: unknown;
-  errorText?: string;
-  preliminary?: boolean;
-  callProviderMetadata?: ProviderMetadata;
-  approval?: {
-    id: string;
-    approved?: boolean;
-    reason?: string;
-  };
-}
-```
-
-### Dynamic Tool UI Part
-
-Dynamic tools (registered at runtime):
-
-```typescript
-interface DynamicToolUIPart {
-  type: "dynamic-tool";
-  toolName: string;
-  toolCallId: string;
-  title?: string;
-  providerExecuted?: boolean;
-  state: /* same states as ToolUIPart */;
-  input?: unknown;
-  output?: unknown;
-  errorText?: string;
-  preliminary?: boolean;
-  callProviderMetadata?: ProviderMetadata;
-  approval?: /* same as ToolUIPart */;
-}
-```
-
-### Source URL UI Part
-
-```typescript
-interface SourceUrlUIPart {
-  type: "source-url";
-  sourceId: string;
-  url: string;
-  title?: string;
-  providerMetadata?: ProviderMetadata;
-}
-```
-
-### Source Document UI Part
-
-```typescript
-interface SourceDocumentUIPart {
-  type: "source-document";
-  sourceId: string;
-  mediaType: string;
-  title: string;
-  filename?: string;
-  providerMetadata?: ProviderMetadata;
-}
-```
-
-### File UI Part
-
-```typescript
-interface FileUIPart {
-  type: "file";
-  mediaType: string;
-  filename?: string;
-  url: string;
-  providerMetadata?: ProviderMetadata;
-}
-```
-
-### Data UI Part
-
-```typescript
-interface DataUIPart {
-  type: `data-${name}`;
-  id?: string;
-  data: unknown;
-}
-```
-
-### Step Start UI Part
-
-```typescript
-interface StepStartUIPart {
-  type: "step-start";
-}
-```
+  Tool parts transition through the following states as chunks arrive: `input-streaming` → `input-available` →
+  `approval-requested`/`approval-responded` (optional) → `output-available`/`output-error`/`output-denied`. Each state preserves
+  the latest `input`, `output`, optional approval payload, and `providerExecuted`/`callProviderMetadata` flags.
 
 ---
 
