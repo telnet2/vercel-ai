@@ -102,287 +102,116 @@ export async function POST(req: Request) {
 }
 ```
 
-## Data Stream Protocol
+## UI Message Stream Protocol
 
-A data stream follows a special protocol that the AI SDK provides to send information to the frontend.
-
-The data stream protocol uses Server-Sent Events (SSE) format for improved standardization, keep-alive through ping, reconnect capabilities, and better cache handling.
+The UI Message Stream Protocol defines how AI responses are streamed from server to browser using Server-Sent Events (SSE). It provides real-time streaming of text, reasoning, tool invocations, files, sources, and custom data parts.
 
 <Note>
   When you provide data streams from a custom backend, you need to set the
   `x-vercel-ai-ui-message-stream` header to `v1`.
 </Note>
 
-The following stream parts are currently supported:
+### Transport Layer
 
-### Message Start Part
+The protocol uses **Server-Sent Events (SSE)** as the underlying transport mechanism.
 
-Indicates the beginning of a new message with metadata.
+#### HTTP Headers
 
-Format: Server-Sent Event with JSON object
+```http
+Content-Type: text/event-stream
+Cache-Control: no-cache
+Connection: keep-alive
+X-Vercel-AI-UI-Message-Stream: v1
+X-Accel-Buffering: no
+```
+
+The `X-Accel-Buffering: no` header disables nginx buffering for proper streaming.
+
+#### Wire Format
+
+Each message chunk is encoded as a JSON object prefixed with `data: ` and terminated with double newlines:
+
+```
+data: {"type":"text-start","id":"text-1"}\n\n
+data: {"type":"text-delta","id":"text-1","delta":"Hello"}\n\n
+data: {"type":"text-delta","id":"text-1","delta":" world"}\n\n
+data: {"type":"text-end","id":"text-1"}\n\n
+data: {"type":"finish","finishReason":"stop"}\n\n
+data: [DONE]\n\n
+```
+
+The stream terminates with `[DONE]` marker.
+
+### Flow Control Parts
+
+#### Message Start Part
+
+Initializes the stream and optionally sets message ID and metadata.
+
+```ts
+{
+  type: "start";
+  messageId?: string;          // Unique message identifier
+  messageMetadata?: unknown;   // Custom metadata for the message
+}
+```
 
 Example:
 
 ```
-data: {"type":"start","messageId":"..."}
+data: {"type":"start","messageId":"msg-123"}
 
 ```
 
-### Text Parts
+#### Finish Message Part
 
-Text content is streamed using a start/delta/end pattern with unique IDs for each text block.
+Signals stream completion with finish reason and optional usage statistics.
 
-#### Text Start Part
+```ts
+{
+  type: "finish";
+  finishReason?: "stop" | "length" | "content-filter" | "tool-calls" | "error" | "other";
+  usage?: LanguageModelUsage;  // Token usage statistics
+  messageMetadata?: unknown;
+}
+```
 
-Indicates the beginning of a text block.
+The `usage` field contains token usage information:
 
-Format: Server-Sent Event with JSON object
+```ts
+{
+  inputTokens: number | undefined;
+  inputTokenDetails: {
+    noCacheTokens: number | undefined;
+    cacheReadTokens: number | undefined;
+    cacheWriteTokens: number | undefined;
+  };
+  outputTokens: number | undefined;
+  outputTokenDetails: {
+    textTokens: number | undefined;
+    reasoningTokens: number | undefined;
+  };
+  totalTokens: number | undefined;
+}
+```
 
 Example:
 
 ```
-data: {"type":"text-start","id":"msg_68679a454370819ca74c8eb3d04379630dd1afb72306ca5d"}
+data: {"type":"finish","finishReason":"stop","usage":{"inputTokens":10,"outputTokens":25,"totalTokens":35}}
 
 ```
 
-#### Text Delta Part
+#### Abort Part
 
-Contains incremental text content for the text block.
+Signals stream was aborted with an optional reason.
 
-Format: Server-Sent Event with JSON object
-
-Example:
-
+```ts
+{
+  type: "abort";
+  reason?: string;             // Optional abort reason
+}
 ```
-data: {"type":"text-delta","id":"msg_68679a454370819ca74c8eb3d04379630dd1afb72306ca5d","delta":"Hello"}
-
-```
-
-#### Text End Part
-
-Indicates the completion of a text block.
-
-Format: Server-Sent Event with JSON object
-
-Example:
-
-```
-data: {"type":"text-end","id":"msg_68679a454370819ca74c8eb3d04379630dd1afb72306ca5d"}
-
-```
-
-### Reasoning Parts
-
-Reasoning content is streamed using a start/delta/end pattern with unique IDs for each reasoning block.
-
-#### Reasoning Start Part
-
-Indicates the beginning of a reasoning block.
-
-Format: Server-Sent Event with JSON object
-
-Example:
-
-```
-data: {"type":"reasoning-start","id":"reasoning_123"}
-
-```
-
-#### Reasoning Delta Part
-
-Contains incremental reasoning content for the reasoning block.
-
-Format: Server-Sent Event with JSON object
-
-Example:
-
-```
-data: {"type":"reasoning-delta","id":"reasoning_123","delta":"This is some reasoning"}
-
-```
-
-#### Reasoning End Part
-
-Indicates the completion of a reasoning block.
-
-Format: Server-Sent Event with JSON object
-
-Example:
-
-```
-data: {"type":"reasoning-end","id":"reasoning_123"}
-
-```
-
-### Source Parts
-
-Source parts provide references to external content sources.
-
-#### Source URL Part
-
-References to external URLs.
-
-Format: Server-Sent Event with JSON object
-
-Example:
-
-```
-data: {"type":"source-url","sourceId":"https://example.com","url":"https://example.com"}
-
-```
-
-#### Source Document Part
-
-References to documents or files.
-
-Format: Server-Sent Event with JSON object
-
-Example:
-
-```
-data: {"type":"source-document","sourceId":"https://example.com","mediaType":"file","title":"Title"}
-
-```
-
-### File Part
-
-The file parts contain references to files with their media type.
-
-Format: Server-Sent Event with JSON object
-
-Example:
-
-```
-data: {"type":"file","url":"https://example.com/file.png","mediaType":"image/png"}
-
-```
-
-### Data Parts
-
-Custom data parts allow streaming of arbitrary structured data with type-specific handling.
-
-Format: Server-Sent Event with JSON object where the type includes a custom suffix
-
-Example:
-
-```
-data: {"type":"data-weather","data":{"location":"SF","temperature":100}}
-
-```
-
-The `data-*` type pattern allows you to define custom data types that your frontend can handle specifically.
-
-### Error Part
-
-The error parts are appended to the message as they are received.
-
-Format: Server-Sent Event with JSON object
-
-Example:
-
-```
-data: {"type":"error","errorText":"error message"}
-
-```
-
-### Tool Input Start Part
-
-Indicates the beginning of tool input streaming.
-
-Format: Server-Sent Event with JSON object
-
-Example:
-
-```
-data: {"type":"tool-input-start","toolCallId":"call_fJdQDqnXeGxTmr4E3YPSR7Ar","toolName":"getWeatherInformation"}
-
-```
-
-### Tool Input Delta Part
-
-Incremental chunks of tool input as it's being generated.
-
-Format: Server-Sent Event with JSON object
-
-Example:
-
-```
-data: {"type":"tool-input-delta","toolCallId":"call_fJdQDqnXeGxTmr4E3YPSR7Ar","inputTextDelta":"San Francisco"}
-
-```
-
-### Tool Input Available Part
-
-Indicates that tool input is complete and ready for execution.
-
-Format: Server-Sent Event with JSON object
-
-Example:
-
-```
-data: {"type":"tool-input-available","toolCallId":"call_fJdQDqnXeGxTmr4E3YPSR7Ar","toolName":"getWeatherInformation","input":{"city":"San Francisco"}}
-
-```
-
-### Tool Output Available Part
-
-Contains the result of tool execution.
-
-Format: Server-Sent Event with JSON object
-
-Example:
-
-```
-data: {"type":"tool-output-available","toolCallId":"call_fJdQDqnXeGxTmr4E3YPSR7Ar","output":{"city":"San Francisco","weather":"sunny"}}
-
-```
-
-### Start Step Part
-
-A part indicating the start of a step.
-
-Format: Server-Sent Event with JSON object
-
-Example:
-
-```
-data: {"type":"start-step"}
-
-```
-
-### Finish Step Part
-
-A part indicating that a step (i.e., one LLM API call in the backend) has been completed.
-
-This part is necessary to correctly process multiple stitched assistant calls, e.g. when calling tools in the backend, and using steps in `useChat` at the same time.
-
-Format: Server-Sent Event with JSON object
-
-Example:
-
-```
-data: {"type":"finish-step"}
-
-```
-
-### Finish Message Part
-
-A part indicating the completion of a message.
-
-Format: Server-Sent Event with JSON object
-
-Example:
-
-```
-data: {"type":"finish"}
-
-```
-
-### Abort Part
-
-Indicates the stream was aborted.
-
-Format: Server-Sent Event with JSON object
 
 Example:
 
@@ -391,26 +220,583 @@ data: {"type":"abort","reason":"user cancelled"}
 
 ```
 
-### Stream Termination
+#### Message Metadata Part
 
-The stream ends with a special `[DONE]` marker.
+Updates message metadata during streaming.
 
-Format: Server-Sent Event with literal `[DONE]`
+```ts
+{
+  type: "message-metadata";
+  messageMetadata: unknown;
+}
+```
 
 Example:
 
 ```
+data: {"type":"message-metadata","messageMetadata":{"custom":"data"}}
+
+```
+
+### Text Parts
+
+Text content is streamed using a start/delta/end pattern with unique IDs to support multiple concurrent text parts.
+
+#### Text Start Part
+
+Begins a new text part.
+
+```ts
+{
+  type: "text-start";
+  id: string;                           // Unique identifier for this text part
+  providerMetadata?: ProviderMetadata;  // Provider-specific metadata
+}
+```
+
+Example:
+
+```
+data: {"type":"text-start","id":"text-1"}
+
+```
+
+#### Text Delta Part
+
+Appends text content to an active text part.
+
+```ts
+{
+  type: "text-delta";
+  id: string;                           // Must match a text-start id
+  delta: string;                        // Text content to append
+  providerMetadata?: ProviderMetadata;
+}
+```
+
+Example:
+
+```
+data: {"type":"text-delta","id":"text-1","delta":"Hello"}
+
+```
+
+#### Text End Part
+
+Finalizes a text part.
+
+```ts
+{
+  type: "text-end";
+  id: string;                           // Must match a text-start id
+  providerMetadata?: ProviderMetadata;
+}
+```
+
+Example:
+
+```
+data: {"type":"text-end","id":"text-1"}
+
+```
+
+### Reasoning Parts
+
+Extended thinking/reasoning content follows the same pattern as text.
+
+#### Reasoning Start Part
+
+Begins a reasoning block.
+
+```ts
+{
+  type: "reasoning-start";
+  id: string;
+  providerMetadata?: ProviderMetadata;
+}
+```
+
+Example:
+
+```
+data: {"type":"reasoning-start","id":"reasoning-1"}
+
+```
+
+#### Reasoning Delta Part
+
+Appends reasoning content.
+
+```ts
+{
+  type: "reasoning-delta";
+  id: string;
+  delta: string;
+  providerMetadata?: ProviderMetadata;
+}
+```
+
+Example:
+
+```
+data: {"type":"reasoning-delta","id":"reasoning-1","delta":"Let me think..."}
+
+```
+
+#### Reasoning End Part
+
+Finalizes a reasoning block.
+
+```ts
+{
+  type: "reasoning-end";
+  id: string;
+  providerMetadata?: ProviderMetadata;
+}
+```
+
+Example:
+
+```
+data: {"type":"reasoning-end","id":"reasoning-1"}
+
+```
+
+### Tool Invocation Parts
+
+Tool calls support streaming input arguments, approval workflows, and output results.
+
+#### Tool Input Start Part
+
+Begins a tool invocation.
+
+```ts
+{
+  type: "tool-input-start";
+  toolCallId: string;                   // Unique identifier for this tool call
+  toolName: string;                     // Name of the tool being invoked
+  providerExecuted?: boolean;           // True if provider will execute the tool
+  providerMetadata?: ProviderMetadata;  // Provider-specific metadata
+  dynamic?: boolean;                    // True for dynamic (runtime-registered) tools
+  title?: string;                       // Human-readable title for the tool call
+}
+```
+
+Example:
+
+```
+data: {"type":"tool-input-start","toolCallId":"call-1","toolName":"getWeather"}
+
+```
+
+#### Tool Input Delta Part
+
+Streams partial JSON input arguments.
+
+```ts
+{
+  type: "tool-input-delta";
+  toolCallId: string;
+  inputTextDelta: string;               // Partial JSON string to append
+}
+```
+
+The client uses partial JSON parsing to extract incomplete objects for UI updates.
+
+Example:
+
+```
+data: {"type":"tool-input-delta","toolCallId":"call-1","inputTextDelta":"{\"location\":\"San Francisco\"}"}
+
+```
+
+#### Tool Input Available Part
+
+Signals complete, validated tool input is ready.
+
+```ts
+{
+  type: "tool-input-available";
+  toolCallId: string;
+  toolName: string;
+  input: unknown;                       // Complete, parsed input object
+  providerExecuted?: boolean;
+  providerMetadata?: ProviderMetadata;
+  dynamic?: boolean;
+  title?: string;
+}
+```
+
+Example:
+
+```
+data: {"type":"tool-input-available","toolCallId":"call-1","toolName":"getWeather","input":{"location":"San Francisco"}}
+
+```
+
+#### Tool Input Error Part
+
+Signals an error occurred during input parsing.
+
+```ts
+{
+  type: "tool-input-error";
+  toolCallId: string;
+  toolName: string;
+  input: unknown;                       // Partial or invalid input
+  errorText: string;                    // Error description
+  providerExecuted?: boolean;
+  providerMetadata?: ProviderMetadata;
+  dynamic?: boolean;
+  title?: string;
+}
+```
+
+Example:
+
+```
+data: {"type":"tool-input-error","toolCallId":"call-1","toolName":"getWeather","input":{},"errorText":"Missing required field: location"}
+
+```
+
+#### Tool Approval Request Part
+
+Requests user approval before tool execution.
+
+```ts
+{
+  type: "tool-approval-request";
+  approvalId: string;                   // Unique identifier for this approval request
+  toolCallId: string;
+}
+```
+
+Example:
+
+```
+data: {"type":"tool-approval-request","approvalId":"approval-1","toolCallId":"call-1"}
+
+```
+
+#### Tool Output Available Part
+
+Provides tool execution result.
+
+```ts
+{
+  type: "tool-output-available";
+  toolCallId: string;
+  output: unknown;                      // Tool execution result
+  providerExecuted?: boolean;
+  dynamic?: boolean;
+  preliminary?: boolean;                // True if this is a partial/streaming result
+}
+```
+
+Example:
+
+```
+data: {"type":"tool-output-available","toolCallId":"call-1","output":{"temperature":18,"condition":"sunny"}}
+
+```
+
+#### Tool Output Error Part
+
+Signals tool execution failed.
+
+```ts
+{
+  type: "tool-output-error";
+  toolCallId: string;
+  errorText: string;                    // Error description
+  providerExecuted?: boolean;
+  dynamic?: boolean;
+}
+```
+
+Example:
+
+```
+data: {"type":"tool-output-error","toolCallId":"call-1","errorText":"API rate limit exceeded"}
+
+```
+
+#### Tool Output Denied Part
+
+Signals user denied tool execution approval.
+
+```ts
+{
+  type: "tool-output-denied";
+  toolCallId: string;
+}
+```
+
+Example:
+
+```
+data: {"type":"tool-output-denied","toolCallId":"call-1"}
+
+```
+
+### Source Parts
+
+References to source materials.
+
+#### Source URL Part
+
+Web URL reference.
+
+```ts
+{
+  type: "source-url";
+  sourceId: string;
+  url: string;
+  title?: string;
+  providerMetadata?: ProviderMetadata;
+}
+```
+
+Example:
+
+```
+data: {"type":"source-url","sourceId":"src-1","url":"https://example.com","title":"Example Page"}
+
+```
+
+#### Source Document Part
+
+Document reference.
+
+```ts
+{
+  type: "source-document";
+  sourceId: string;
+  mediaType: string;                    // IANA media type
+  title: string;
+  filename?: string;
+  providerMetadata?: ProviderMetadata;
+}
+```
+
+Example:
+
+```
+data: {"type":"source-document","sourceId":"doc-1","mediaType":"application/pdf","title":"Report"}
+
+```
+
+### File Part
+
+File attachment.
+
+```ts
+{
+  type: "file";
+  url: string;                          // URL or Data URL
+  mediaType: string;                    // IANA media type
+  providerMetadata?: ProviderMetadata;
+}
+```
+
+Example:
+
+```
+data: {"type":"file","url":"https://example.com/image.png","mediaType":"image/png"}
+
+```
+
+### Step Boundary Parts
+
+For multi-step reasoning workflows.
+
+#### Start Step Part
+
+Marks the beginning of a new reasoning step.
+
+```ts
+{
+  type: "start-step";
+}
+```
+
+Example:
+
+```
+data: {"type":"start-step"}
+
+```
+
+#### Finish Step Part
+
+Marks the end of a reasoning step. Resets active text and reasoning parts.
+
+This part is necessary to correctly process multiple stitched assistant calls, e.g. when calling tools in the backend, and using steps in `useChat` at the same time.
+
+```ts
+{
+  type: "finish-step";
+}
+```
+
+Example:
+
+```
+data: {"type":"finish-step"}
+
+```
+
+### Data Parts
+
+Custom data parts with dynamic type names.
+
+```ts
+{
+  type: `data-${string}`;               // e.g., "data-weather", "data-chart"
+  id?: string;                          // Optional ID for updates
+  data: unknown;                        // Custom payload
+  transient?: boolean;                  // If true, not persisted to message state
+}
+```
+
+Data parts with the same `type` and `id` will update existing parts instead of creating new ones.
+
+Example:
+
+```
+data: {"type":"data-weather","data":{"location":"SF","temperature":72}}
+
+```
+
+### Error Part
+
+Error notification.
+
+```ts
+{
+  type: "error";
+  errorText: string;
+}
+```
+
+Example:
+
+```
+data: {"type":"error","errorText":"An error occurred"}
+
+```
+
+### Provider Metadata
+
+Optional provider-specific metadata can be attached to chunks:
+
+```ts
+type ProviderMetadata = Record<string, Record<string, JSONValue | undefined>>;
+```
+
+Example:
+
+```json
+{
+  "anthropic": {
+    "cacheControl": "ephemeral"
+  }
+}
+```
+
+### Complete Examples
+
+#### Simple Text Response
+
+```
+data: {"type":"start","messageId":"msg-123"}
+
+data: {"type":"text-start","id":"text-1"}
+
+data: {"type":"text-delta","id":"text-1","delta":"Hello"}
+
+data: {"type":"text-delta","id":"text-1","delta":"! How can I help?"}
+
+data: {"type":"text-end","id":"text-1"}
+
+data: {"type":"finish","finishReason":"stop"}
+
 data: [DONE]
 
 ```
 
-The data stream protocol is supported
-by `useChat` and `useCompletion` on the frontend and used by default.
+#### Tool Call with Streaming Input
+
+```
+data: {"type":"start","messageId":"msg-456"}
+
+data: {"type":"text-start","id":"text-1"}
+
+data: {"type":"text-delta","id":"text-1","delta":"Let me check the weather."}
+
+data: {"type":"text-end","id":"text-1"}
+
+data: {"type":"tool-input-start","toolCallId":"call-1","toolName":"getWeather"}
+
+data: {"type":"tool-input-delta","toolCallId":"call-1","inputTextDelta":"{\"location\":"}
+
+data: {"type":"tool-input-delta","toolCallId":"call-1","inputTextDelta":"\"San Francisco\",\"unit\":\"celsius\"}"}
+
+data: {"type":"tool-input-available","toolCallId":"call-1","toolName":"getWeather","input":{"location":"San Francisco","unit":"celsius"}}
+
+data: {"type":"tool-output-available","toolCallId":"call-1","output":{"temperature":18,"condition":"sunny"}}
+
+data: {"type":"text-start","id":"text-2"}
+
+data: {"type":"text-delta","id":"text-2","delta":"The weather in San Francisco is 18°C and sunny."}
+
+data: {"type":"text-end","id":"text-2"}
+
+data: {"type":"finish","finishReason":"stop"}
+
+data: [DONE]
+
+```
+
+#### Multi-Step Reasoning
+
+```
+data: {"type":"start","messageId":"msg-789"}
+
+data: {"type":"reasoning-start","id":"reason-1"}
+
+data: {"type":"reasoning-delta","id":"reason-1","delta":"Let me think through this problem step by step..."}
+
+data: {"type":"reasoning-end","id":"reason-1"}
+
+data: {"type":"text-start","id":"text-1"}
+
+data: {"type":"text-delta","id":"text-1","delta":"Based on my analysis..."}
+
+data: {"type":"text-end","id":"text-1"}
+
+data: {"type":"finish-step"}
+
+data: {"type":"start-step"}
+
+data: {"type":"text-start","id":"text-2"}
+
+data: {"type":"text-delta","id":"text-2","delta":"Here is the next step..."}
+
+data: {"type":"text-end","id":"text-2"}
+
+data: {"type":"finish","finishReason":"stop"}
+
+data: [DONE]
+
+```
+
+### UI Message Stream Example
+
+The data stream protocol is supported by `useChat` and `useCompletion` on the frontend and used by default.
 `useCompletion` only supports the `text` and `data` stream parts.
 
 On the backend, you can use `toUIMessageStreamResponse()` from the `streamText` result object to return a streaming HTTP response.
-
-### UI Message Stream Example
 
 Here is a Next.js example that uses the UI message stream protocol:
 
