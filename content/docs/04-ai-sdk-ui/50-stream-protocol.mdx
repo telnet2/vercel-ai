@@ -142,6 +142,30 @@ data: [DONE]\n\n
 
 The stream terminates with `[DONE]` marker.
 
+#### Encoding Pipeline
+
+**Server-Side (Encoding)**:
+```
+UIMessageChunk Objects
+    ↓ JsonToSseTransformStream
+SSE-formatted strings ("data: {...}\n\n")
+    ↓ TextEncoderStream
+UTF-8 bytes
+    ↓
+HTTP Response body
+```
+
+**Client-Side (Decoding)**:
+```
+HTTP Response body (Uint8Array)
+    ↓ TextDecoderStream
+UTF-8 strings
+    ↓ EventSourceParserStream
+Parsed SSE events
+    ↓ JSON.parse + Schema Validation
+UIMessageChunk Objects
+```
+
 ### Flow Control Parts
 
 #### Message Start Part
@@ -539,6 +563,106 @@ data: {"type":"tool-output-denied","toolCallId":"call-1"}
 
 ```
 
+#### Tool State Machine
+
+Tool invocations follow a state machine pattern. The client tracks each tool call through these states:
+
+```
+                    ┌─────────────────┐
+                    │  tool-input-    │
+                    │     start       │
+                    └────────┬────────┘
+                             │
+        ┌────────────────────┼────────────────────┐
+        │                    │                    │
+        ▼                    ▼                    ▼
+┌───────────────┐   ┌────────────────┐   ┌────────────────┐
+│ tool-input-   │   │ tool-input-    │   │ tool-input-    │
+│    delta      │──▶│   available    │   │    error       │
+│ (streaming)   │   └───────┬────────┘   └────────────────┘
+└───────────────┘           │
+                            │
+         ┌──────────────────┼──────────────────┐
+         │                  │                  │
+         ▼                  ▼                  ▼
+┌────────────────┐  ┌───────────────┐  ┌───────────────┐
+│ tool-approval- │  │ tool-output-  │  │ tool-output-  │
+│   request      │  │  available    │  │    error      │
+└───────┬────────┘  └───────────────┘  └───────────────┘
+        │
+   ┌────┴─────┐
+   │          │
+   ▼          ▼
+┌─────────┐  ┌─────────────────┐
+│approved │  │ tool-output-    │
+│         │  │    denied       │
+└────┬────┘  └─────────────────┘
+     │
+     ▼
+┌────────────────┐
+│ tool-output-   │
+│  available     │
+└────────────────┘
+```
+
+**Tool Part States in UI:**
+
+| State | Description |
+|-------|-------------|
+| `input-streaming` | Receiving `tool-input-delta` chunks, input being accumulated |
+| `input-available` | Complete input received via `tool-input-available` |
+| `input-error` | Input parsing failed via `tool-input-error` |
+| `approval-requested` | Awaiting user decision via `tool-approval-request` |
+| `output-available` | Tool executed successfully via `tool-output-available` |
+| `output-error` | Tool execution failed via `tool-output-error` |
+| `output-denied` | User rejected approval via `tool-output-denied` |
+
+#### Partial JSON Parsing
+
+During tool input streaming, the client accumulates `inputTextDelta` chunks and uses partial JSON parsing to extract incomplete objects. This enables real-time UI updates showing tool arguments as they stream in:
+
+```
+Accumulated: {"location":"San Fra
+Parsed partial: { location: "San Fra" }  // Displayable in UI
+
+Accumulated: {"location":"San Francisco","unit":
+Parsed partial: { location: "San Francisco" }  // unit key incomplete, omitted
+
+Accumulated: {"location":"San Francisco","unit":"celsius"}
+Parsed complete: { location: "San Francisco", unit: "celsius" }
+```
+
+This allows UIs to show tool arguments progressively rather than waiting for complete JSON.
+
+#### Static vs Dynamic Tools
+
+Tools are categorized as either **static** or **dynamic**:
+
+- **Static tools**: Registered at configuration time with known schemas. The UI message part type is `tool-${toolName}` (e.g., `tool-getWeather`).
+- **Dynamic tools**: Registered at runtime without predefined schemas. Set `dynamic: true` in tool chunks. The UI message part type is always `dynamic-tool`.
+
+```ts
+// Static tool part in UI
+{
+  type: "tool-getWeather";  // Type includes tool name
+  toolCallId: string;
+  toolName: "getWeather";
+  state: "output-available";
+  input: { location: "San Francisco" };
+  output: { temperature: 18 };
+}
+
+// Dynamic tool part in UI
+{
+  type: "dynamic-tool";     // Generic type for all dynamic tools
+  toolCallId: string;
+  toolName: "customTool";   // Tool name in separate field
+  state: "output-available";
+  input: { ... };
+  output: { ... };
+}
+```
+
 ### Source Parts
 
 References to source materials.
@@ -704,6 +828,55 @@ Example:
 }
 ```
 
+### Chunk Validation Rules
+
+The client enforces these validation rules when processing chunks. Violations throw a `UIMessageStreamError`:
+
+| Rule | Description |
+|------|-------------|
+| `text-delta` requires prior `text-start` | A `text-delta` chunk must reference an ID from a preceding `text-start` |
+| `text-end` requires prior `text-start` | A `text-end` chunk must reference an ID from a preceding `text-start` |
+| `reasoning-delta` requires prior `reasoning-start` | A `reasoning-delta` chunk must reference an ID from a preceding `reasoning-start` |
+| `reasoning-end` requires prior `reasoning-start` | A `reasoning-end` chunk must reference an ID from a preceding `reasoning-start` |
+| `tool-input-delta` requires prior `tool-input-start` | A `tool-input-delta` chunk must reference a `toolCallId` from a preceding `tool-input-start` |
+
+Example error:
+
+```ts
+UIMessageStreamError {
+  message: "Received text-delta chunk with id 'text-1' but no text-start chunk was received",
+  chunkType: "text-delta",
+  chunkId: "text-1"
+}
+```
+
+### UI Message Structure
+
+Stream chunks are processed into `UIMessage` objects for rendering. A `UIMessage` contains:
+
+```ts
+{
+  id: string;                    // Unique message identifier
+  role: "user" | "assistant";    // Message role
+  metadata?: unknown;            // Optional custom metadata
+  parts: UIMessagePart[];        // Array of content parts
+}
+```
+
+**Part Types:**
+
+| Part Type | Source Chunks | Description |
+|-----------|---------------|-------------|
+| `text` | `text-start`, `text-delta`, `text-end` | Text content with `state: "streaming" \| "complete"` |
+| `reasoning` | `reasoning-start`, `reasoning-delta`, `reasoning-end` | Reasoning content with streaming state |
+| `source-url` | `source-url` | URL reference with `sourceId`, `url`, `title` |
+| `source-document` | `source-document` | Document reference with `mediaType`, `title`, `filename` |
+| `file` | `file` | File attachment with `url`, `mediaType` |
+| `tool-${name}` | Tool chunks (static) | Static tool invocation with state machine |
+| `dynamic-tool` | Tool chunks (dynamic) | Dynamic tool invocation with state machine |
+| `data-${name}` | `data-*` | Custom data payload |
+| `step-start` | `start-step` | Step boundary marker |
+
 ### Complete Examples
 
 #### Simple Text Response
@@ -791,6 +964,140 @@ data: [DONE]
 
 ```
 
+#### Tool Call with Approval Flow
+
+This example shows a tool that requires user approval before execution:
+
+```
+data: {"type":"start","messageId":"msg-approval"}
+
+data: {"type":"text-start","id":"text-1"}
+
+data: {"type":"text-delta","id":"text-1","delta":"I need to delete that file for you."}
+
+data: {"type":"text-end","id":"text-1"}
+
+data: {"type":"tool-input-start","toolCallId":"call-1","toolName":"deleteFile"}
+
+data: {"type":"tool-input-available","toolCallId":"call-1","toolName":"deleteFile","input":{"path":"/tmp/old-data.json"}}
+
+data: {"type":"tool-approval-request","approvalId":"approval-1","toolCallId":"call-1"}
+
+```
+
+At this point, the stream pauses waiting for user approval. After user approves:
+
+```
+data: {"type":"tool-output-available","toolCallId":"call-1","output":{"deleted":true}}
+
+data: {"type":"text-start","id":"text-2"}
+
+data: {"type":"text-delta","id":"text-2","delta":"Done! The file has been deleted."}
+
+data: {"type":"text-end","id":"text-2"}
+
+data: {"type":"finish","finishReason":"stop"}
+
+data: [DONE]
+
+```
+
+If user denies approval:
+
+```
+data: {"type":"tool-output-denied","toolCallId":"call-1"}
+
+data: {"type":"text-start","id":"text-2"}
+
+data: {"type":"text-delta","id":"text-2","delta":"OK, I won't delete the file."}
+
+data: {"type":"text-end","id":"text-2"}
+
+data: {"type":"finish","finishReason":"stop"}
+
+data: [DONE]
+
+```
+
+#### Tool Call with Error
+
+```
+data: {"type":"start","messageId":"msg-error"}
+
+data: {"type":"tool-input-start","toolCallId":"call-1","toolName":"fetchData"}
+
+data: {"type":"tool-input-available","toolCallId":"call-1","toolName":"fetchData","input":{"url":"https://api.example.com/data"}}
+
+data: {"type":"tool-output-error","toolCallId":"call-1","errorText":"Connection timeout after 30s"}
+
+data: {"type":"text-start","id":"text-1"}
+
+data: {"type":"text-delta","id":"text-1","delta":"I wasn't able to fetch the data due to a connection timeout. Would you like me to try again?"}
+
+data: {"type":"text-end","id":"text-1"}
+
+data: {"type":"finish","finishReason":"stop"}
+
+data: [DONE]
+
+```
+
+#### Streaming with Sources and Files
+
+```
+data: {"type":"start","messageId":"msg-sources"}
+
+data: {"type":"text-start","id":"text-1"}
+
+data: {"type":"text-delta","id":"text-1","delta":"Based on the documents you provided, here's a summary:"}
+
+data: {"type":"text-end","id":"text-1"}
+
+data: {"type":"source-document","sourceId":"doc-1","mediaType":"application/pdf","title":"Q4 Report","filename":"q4-report.pdf"}
+
+data: {"type":"source-url","sourceId":"src-1","url":"https://example.com/analysis","title":"Market Analysis"}
+
+data: {"type":"text-start","id":"text-2"}
+
+data: {"type":"text-delta","id":"text-2","delta":"Revenue increased by 15% compared to last quarter."}
+
+data: {"type":"text-end","id":"text-2"}
+
+data: {"type":"file","url":"data:image/png;base64,iVBORw0KGgo...","mediaType":"image/png"}
+
+data: {"type":"finish","finishReason":"stop","usage":{"inputTokens":1250,"outputTokens":89,"totalTokens":1339}}
+
+data: [DONE]
+
+```
+
+#### Custom Data Parts
+
+```
+data: {"type":"start","messageId":"msg-data"}
+
+data: {"type":"text-start","id":"text-1"}
+
+data: {"type":"text-delta","id":"text-1","delta":"Here's the current weather:"}
+
+data: {"type":"text-end","id":"text-1"}
+
+data: {"type":"data-weather","id":"weather-1","data":{"location":"San Francisco","temperature":18,"condition":"sunny","humidity":65}}
+
+data: {"type":"text-start","id":"text-2"}
+
+data: {"type":"text-delta","id":"text-2","delta":"And here's a chart of the weekly forecast:"}
+
+data: {"type":"text-end","id":"text-2"}
+
+data: {"type":"data-chart","data":{"type":"line","labels":["Mon","Tue","Wed","Thu","Fri"],"values":[18,20,19,22,21]}}
+
+data: {"type":"finish","finishReason":"stop"}
+
+data: [DONE]
+
+```
+
 ### UI Message Stream Example
 
 The data stream protocol is supported by `useChat` and `useCompletion` on the frontend and used by default.
@@ -861,3 +1168,74 @@ export async function POST(req: Request) {
   return result.toUIMessageStreamResponse();
 }
 ```
+
+### Implementing Custom Backends
+
+When implementing the UI Message Stream Protocol in a custom backend (e.g., Python, Go, Rust), follow these guidelines:
+
+#### Required Headers
+
+Always set these headers on your response:
+
+```http
+Content-Type: text/event-stream
+Cache-Control: no-cache
+Connection: keep-alive
+X-Vercel-AI-UI-Message-Stream: v1
+X-Accel-Buffering: no
+```
+
+#### Message Format
+
+Each chunk must be:
+1. Prefixed with `data: `
+2. Followed by a valid JSON object
+3. Terminated with `\n\n` (two newlines)
+
+```python
+# Python example
+def send_chunk(chunk: dict) -> str:
+    return f"data: {json.dumps(chunk)}\n\n"
+```
+
+#### Minimum Required Sequence
+
+At minimum, a valid stream should contain:
+
+```
+data: {"type":"start","messageId":"<unique-id>"}
+
+data: {"type":"text-start","id":"<unique-id>"}
+
+data: {"type":"text-delta","id":"<same-id>","delta":"<content>"}
+
+data: {"type":"text-end","id":"<same-id>"}
+
+data: {"type":"finish","finishReason":"stop"}
+
+data: [DONE]
+
+```
+
+#### Error Handling
+
+Errors can occur at multiple levels:
+
+1. **HTTP Level**: Return appropriate status codes (4xx, 5xx) before streaming begins
+2. **Stream Level**: Send `error` chunks to notify the client during streaming
+3. **Parse Level**: Invalid JSON or schema violations will throw errors on the client
+
+For graceful error handling during streaming:
+
+```
+data: {"type":"error","errorText":"An error occurred while processing your request"}
+
+data: {"type":"finish","finishReason":"error"}
+
+data: [DONE]
+
+```
+
+#### Schema Validation
+
+All chunks are validated against Zod schemas on the client side. Ensure your chunks match the exact field names and types documented above. Extra fields will cause validation errors with `strictObject` validation.
