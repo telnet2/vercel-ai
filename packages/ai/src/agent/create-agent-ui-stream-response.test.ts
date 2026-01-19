@@ -42,7 +42,7 @@ describe('createAgentUIStreamResponse', () => {
                 { type: 'text-end', id: '1' },
                 {
                   type: 'finish',
-                  finishReason: 'stop',
+                  finishReason: { unified: 'stop', raw: 'stop' },
                   usage: {
                     inputTokens: {
                       total: 10,
@@ -74,7 +74,7 @@ describe('createAgentUIStreamResponse', () => {
               value: z.string(),
             }),
             // important: tool has toModelOutput that needs to be called
-            toModelOutput: output => ({
+            toModelOutput: ({ output }) => ({
               type: 'content',
               value: [{ type: 'text', text: output.value }],
             }),
@@ -84,7 +84,7 @@ describe('createAgentUIStreamResponse', () => {
 
       response = await createAgentUIStreamResponse({
         agent,
-        messages: [
+        uiMessages: [
           {
             role: 'user',
             id: 'msg-1',
@@ -245,7 +245,7 @@ describe('createAgentUIStreamResponse', () => {
           "data: {"type":"finish-step"}
 
         ",
-          "data: {"type":"finish","finishReason":"stop"}
+          "data: {"type":"finish","finishReason":"stop","usage":{"inputTokens":10,"inputTokenDetails":{"noCacheTokens":10},"outputTokens":10,"outputTokenDetails":{"textTokens":10},"totalTokens":20}}
 
         ",
           "data: [DONE]
